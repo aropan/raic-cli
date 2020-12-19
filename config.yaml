@@ -1,0 +1,10 @@
+users:
+  - username: aropan
+    # strategy: 6
+  - query: suggest
+  - query: suggest
+  - query: suggest
+
+formats:
+  # - 4x1$${"preset":"Round1"}
+  - 4x1$${"preset":"Round2"}
