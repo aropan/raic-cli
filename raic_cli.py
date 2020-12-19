@@ -132,7 +132,7 @@ class RAIC:
     def clear_cache(self):
         self.cache = {}
 
-    def new_game(self, users, formats):
+    def create_game(self, users, formats):
         game_params = {
             'action': 'createGame',
             'csrf_token': self.csrf_token,
@@ -186,7 +186,7 @@ class Main:
         self._raic = RAIC(cookie_file)
         self._raic.signin()
 
-    def new_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20):
+    def create_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20):
         timing = []
         while True:
             if len(timing) == limit_game:
@@ -194,7 +194,7 @@ class Main:
 
             while True:
                 try:
-                    self._raic.new_game(self._config['users'], self._config['formats'])
+                    self._raic.create_game(self._config['users'], self._config['formats'])
                     timing.append(datetime.now())
                     break
                 except CreateGameFailed:
