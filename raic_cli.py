@@ -4,7 +4,6 @@ import os
 import getpass
 import logging
 import random
-import tqdm
 import glob
 from datetime import datetime, timedelta
 from time import sleep
@@ -16,6 +15,7 @@ import coloredlogs
 import fire
 import requests
 import yaml
+import tqdm
 from lxml.html import fromstring
 
 
