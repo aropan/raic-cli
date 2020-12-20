@@ -4,9 +4,13 @@ import os
 import getpass
 import logging
 import random
+import tqdm
+import glob
 from datetime import datetime, timedelta
 from time import sleep
 from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
 
 import coloredlogs
 import fire
@@ -23,6 +27,10 @@ class SignInFailed(Exception):
 
 
 class CreateGameFailed(Exception):
+    pass
+
+
+class ResponseError(Exception):
     pass
 
 
@@ -48,11 +56,81 @@ def wait(value):
     logger.debug('Wait done')
 
 
+def ensure_folder(folder):
+    os.makedirs(folder, exist_ok=True)
+
+
+class UserFolder:
+
+    def __init__(self, username, cache_folder):
+        self.username = username
+        self.folder = os.path.join(cache_folder, username)
+        self.games_folder = os.path.join(self.folder, 'games')
+
+    @property
+    def data_file(self):
+        return os.path.join(self.folder, 'data.yaml')
+
+    def read_data(self):
+        data_file = self.data_file
+        if os.path.exists(data_file):
+            with open(data_file, 'r') as fo:
+                data = yaml.safe_load(fo)
+        else:
+            data = {}
+        return data
+
+    def write_data(self, data):
+        with open(self.data_file, 'w') as fo:
+            yaml.dump(data, fo, indent=2)
+
+    def game_file(self, game_id):
+        game_id = f'{game_id:>08s}'
+        filepath = os.path.join(self.games_folder, game_id[:4], f'{game_id}.yaml')
+        ensure_folder(os.path.dirname(filepath))
+        return filepath
+
+    def exists_game(self, game_id):
+        return os.path.exists(self.game_file(game_id))
+
+    def read_game(self, game_file):
+        with open(game_file, 'r') as fo:
+            game_data = yaml.safe_load(fo)
+
+        ret = {
+            'info': game_data['game'],
+            'participants': {},
+        }
+        rating_changes = game_data.get('ratingChanges')
+        for idx, (participant, user) in enumerate(zip(game_data['gameParticipants'], game_data['users'])):
+            user = user['login']
+            participant['user'] = user
+            if rating_changes:
+                participant['ratingChanges'] = rating_changes[idx]
+            ret['participants'][user] = participant
+
+        return ret
+
+    def write_game(self, game_id, data):
+        with open(self.game_file(game_id), 'w') as fo:
+            yaml.dump(data, fo, indent=2)
+
+    def games(self):
+        files = glob.glob(os.path.join(self.games_folder, '**/*.yaml'))
+        files.sort(reverse=True)
+
+        with ProcessPoolExecutor() as executor, tqdm.tqdm(total=len(files), leave=True) as pbar:
+            for game in executor.map(self.read_game, files):
+                pbar.update()
+                yield game
+
+
 class RAIC:
 
-    def __init__(self, cookie_file, host='https://russianaicup.ru/'):
+    def __init__(self, cookie_file, cache_folder, host='https://russianaicup.ru/'):
         self.host = host
         self.cookie_file = cookie_file
+        self.cache_folder = cache_folder
         self.session = requests.session()
         self.load_cookies()
         self.cache = {}
@@ -74,7 +152,18 @@ class RAIC:
     def get(self, url, method='get', parse=False, **kwargs):
         logger.debug(f'{method} {url}')
         func = getattr(self.session, method)
-        response = func(urljoin(self.host, url), **kwargs)
+
+        n_attempt = 5
+        while True:
+            response = func(urljoin(self.host, url), **kwargs)
+            if response.status_code != 200:
+                if n_attempt == 0:
+                    raise ResponseError(response)
+                n_attempt -= 1
+                sleep(2)
+            else:
+                break
+
         if 'application/json' in response.headers.get('content-type'):
             response = response.json()
         elif parse:
@@ -87,6 +176,11 @@ class RAIC:
     def post(self, *args, **kwargs):
         kwargs['method'] = 'post'
         return self.get(*args, **kwargs)
+
+    @staticmethod
+    def total_num_pages(page):
+        page_nums = page.xpath('//*[@class="page-index"]/a/text()')
+        return int(page_nums[-1]) if page_nums else None
 
     def is_authorized(self, page):
         return bool(page.xpath('//a[@class="logout" and contains(@href, "signOut")]'))
@@ -116,7 +210,7 @@ class RAIC:
             return True
         return False
 
-    def get_suggest(self, username):
+    def suggest(self, username):
         users = self.cache.get(username)
         if not users:
             data = self.post('/data/suggestUser', data={
@@ -127,6 +221,33 @@ class RAIC:
             users = data['randomUsers'].split('|')
             random.shuffle(users)
             self.cache[username] = users
+        return users.pop(0)
+
+    def random_from_top(self, contest, number):
+        key = (contest, number)
+        users = self.cache.get(key)
+        if not users:
+            contest = self.contest_id(contest)
+            users = []
+            page_num = 1
+            total_num_pages = None
+            while (total_num_pages is None or page_num <= total_num_pages):
+                page = self.get(f'/contest/{contest}/standings/page/{page_num}', parse=True)
+
+                members = page.xpath('//tr[contains(@id, "standings-row-for-place")]//a[contains(@href, "/profile/")]/img[@title]/@title')  # noqa
+                users.extend(members)
+
+                if total_num_pages is None:
+                    total_num_pages = self.total_num_pages(page)
+                    if total_num_pages is None:
+                        break
+
+                print(f'\rrandom from top... {page_num} of {total_num_pages}', end='\n')
+                page_num += 1
+
+            users = users[:number]
+            random.shuffle(users)
+            self.cache[key] = users
         return users.pop(0)
 
     def clear_cache(self):
@@ -143,12 +264,18 @@ class RAIC:
         strategies = []
         for idx, user in enumerate(users, start=1):
             query = user.get('query')
-            if query == 'suggest':
-                assert username_for_suggest, 'Suggest query must be after user with username set'
-                username = self.get_suggest(username_for_suggest)
+            if 'username' not in user:
+                if query == 'suggest':
+                    assert username_for_suggest, 'Suggest query must be after user with username set'
+                    username = self.suggest(username_for_suggest)
+                elif query == 'top':
+                    username = self.random_from_top(user['contest'], user['number'])
+                else:
+                    raise ValueError(f'Unknown query "{query}"')
             else:
                 username = user['username']
-                username_for_suggest = username
+
+            username_for_suggest = username
 
             strategy = user.get('strategy')
             if not strategy:
@@ -169,6 +296,65 @@ class RAIC:
         if self.has_errors(page):
             raise CreateGameFailed()
 
+    def fetch_games(self, username):
+        user = UserFolder(username, self.cache_folder)
+        user_data = user.read_data()
+
+        game_ids = []
+        page_num = 1
+        total_num_pages = None
+        while total_num_pages is None or page_num <= total_num_pages:
+            page = self.get(f'/profile/{username}/allGames/page/{page_num}', parse=True)
+            ids = [str(i) for i in page.xpath('//a[starts-with(@href, "/game/view/") and not(@style)]/text()')]
+            game_ids.extend(ids)
+
+            if total_num_pages is None:
+                total_num_pages = self.total_num_pages(page)
+                if total_num_pages is None:
+                    break
+            if user_data.get("last_game_id") in ids:
+                break
+            of = total_num_pages - user_data.get("total_num_pages", 1) + 1
+            print(f'\rfetch game pages... {page_num} of {of}', end='')
+            page_num += 1
+        print(end='\r')
+
+        if not game_ids:
+            return
+
+        def fetch_and_save_game_data(game_id):
+            if user.exists_game(game_id):
+                return
+            data = self.post('/data/gameInformation', data={
+                'gameId': game_id,
+                'csrf_token': self.csrf_token,
+            })
+            user.write_game(game_id, data)
+
+        with ThreadPoolExecutor() as executor, tqdm.tqdm(total=len(game_ids), leave=False) as pbar:
+            for _ in executor.map(fetch_and_save_game_data, game_ids):
+                pbar.update()
+
+        user_data['last_game_id'] = game_ids[0]
+        user_data['total_num_pages'] = total_num_pages
+
+        user.write_data(user_data)
+
+    def games(self, username):
+        user = UserFolder(username, self.cache_folder)
+        return user.games()
+
+    def game_url(self, game_id):
+        return urljoin(self.host, f'/game/view/{game_id}')
+
+    def contest_id(self, name):
+        return {
+            'sandbox': 1,
+            'round1': 2,
+            'round2': 3,
+            'finals': 4,
+        }[name]
+
 
 class Main:
 
@@ -176,6 +362,7 @@ class Main:
         self,
         config_file=os.path.join(os.path.dirname(__file__), 'config.yaml'),
         cookie_file=os.path.join(os.path.dirname(__file__), 'cookies.yaml'),
+        cache_folder=os.path.join(os.path.dirname(__file__), 'cache'),
         verbose=False,
     ):
         level = logging.DEBUG if verbose else logging.INFO
@@ -183,7 +370,7 @@ class Main:
 
         with open(config_file, 'r') as fo:
             self._config = yaml.safe_load(fo)
-        self._raic = RAIC(cookie_file)
+        self._raic = RAIC(cookie_file=cookie_file, cache_folder=cache_folder)
         self._raic.signin()
 
     def create_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20):
@@ -205,6 +392,33 @@ class Main:
                 limit -= 1
                 if not limit:
                     break
+
+    def find_games(self, username, limit=10, contest=None, rank=None):
+        self._raic.fetch_games(username)
+
+        if contest:
+            contest = self._raic.contest_id(contest)
+
+        games = []
+        for game in self._raic.games(username):
+            info = game['info']
+            if contest and info.get('contestId') != contest:
+                continue
+
+            participant = game['participants'][username]
+            if rank and participant.get('rank') != rank:
+                continue
+
+            games.append(game)
+
+            if limit:
+                limit -= 1
+                if not limit:
+                    break
+
+        for game in games:
+            url = self._raic.game_url(game['info']['id'])
+            print(url)
 
 
 if __name__ == '__main__':
