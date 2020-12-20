@@ -10,16 +10,20 @@ pip3 install -r requirements.txt
 
 Edit config file `config.yaml`, as example:
 ```yaml
+# create-game
 users:
   - username: aropan
     # strategy: 6
-  - query: suggest
-  - query: suggest
-  - query: suggest
+  - query: top
+    contest: round2
+    number: 50
+  # - query: suggest
+  # - query: suggest
 
 formats:
   # - 4x1$${"preset":"Round1"}
-  - 4x1$${"preset":"Round2"}
+  # - 4x1$${"preset":"Round2"}
+  - 2x1$${"preset":"Finals"}
 ```
 
 ### Create game
