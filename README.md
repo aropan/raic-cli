@@ -14,10 +14,22 @@ Edit config file `config.yaml`, as example:
 users:
   - username: aropan
     # strategy: 6
+
   - query: top
-    contest: round2
-    number: 50
-  # - query: suggest
+    sources:
+      - contest: round2
+        number: 50
+      - contest: sandbox
+        number: 10
+        without: finals
+
+  # - query: random
+  #   users:
+  #     - username: Commandos
+  #     - username: Recar
+  #     - username: GreenTea
+  #     - username: Romka
+
   # - query: suggest
 
 formats:
