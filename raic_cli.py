@@ -5,6 +5,7 @@ import getpass
 import logging
 import random
 import glob
+from copy import deepcopy
 from datetime import datetime, timedelta
 from time import sleep
 from urllib.parse import urljoin
@@ -34,6 +35,27 @@ class ResponseError(Exception):
     pass
 
 
+class InlineLogger():
+
+    def __init__(self):
+        self.last_len = 0
+
+    def __call__(self, msg):
+        print('\r' + ' ' * self.last_len, end='')
+        print(f'\r{msg}', end='')
+        self.last_len = len(msg)
+
+    def clear(self):
+        if self.last_len:
+            self("")
+
+    def __del__(self):
+        self.clear()
+
+
+inline_logger = InlineLogger()
+
+
 def wait(value):
     logger.debug(f'Wait {value}')
 
@@ -50,9 +72,9 @@ def wait(value):
             break
         delta = finish_time - now
         minutes, seconds = divmod(int(delta.total_seconds()), 60)
-        print(f'\rwaiting... {minutes}:{seconds:02d}', end='')
+        inline_logger(f'waiting... {minutes}:{seconds:02d}')
         sleep(1)
-    print(end='\r')
+    inline_logger.clear()
     logger.debug('Wait done')
 
 
@@ -134,6 +156,7 @@ class RAIC:
         self.session = requests.session()
         self.load_cookies()
         self.cache = {}
+        self.inline_log = InlineLogger()
 
     def __del__(self):
         self.save_cookies()
@@ -152,17 +175,26 @@ class RAIC:
     def get(self, url, method='get', parse=False, **kwargs):
         logger.debug(f'{method} {url}')
         func = getattr(self.session, method)
+        kwargs.setdefault('timeout', 60)
 
         n_attempt = 5
         while True:
-            response = func(urljoin(self.host, url), **kwargs)
-            if response.status_code != 200:
-                if n_attempt == 0:
-                    raise ResponseError(response)
-                n_attempt -= 1
-                sleep(2)
-            else:
-                break
+            try:
+                inline_logger(f'{method} {url}')
+                response = func(urljoin(self.host, url), **kwargs)
+                if response.status_code != 200:
+                    if n_attempt == 0:
+                        raise ResponseError(response)
+                    n_attempt -= 1
+                    wait(5)
+                    continue
+                else:
+                    break
+            except Exception as e:
+                inline_logger.clear()
+                logger.error(e)
+                wait(60)
+        inline_logger.clear()
 
         if 'application/json' in response.headers.get('content-type'):
             response = response.json()
@@ -219,41 +251,54 @@ class RAIC:
                 'csrf_token': self.csrf_token,
             })
             users = data['randomUsers'].split('|')
-            random.shuffle(users)
+            users = [{'username': user} for user in users]
             self.cache[username] = users
-        return users.pop(0)
+        return users
 
-    def random_from_top(self, contest, number):
-        key = (contest, number)
-        users = self.cache.get(key)
-        if not users:
-            contest = self.contest_id(contest)
-            users = []
-            page_num = 1
-            total_num_pages = None
-            while (total_num_pages is None or page_num <= total_num_pages):
-                page = self.get(f'/contest/{contest}/standings/page/{page_num}', parse=True)
+    def top(self, sources):
+        ret = []
+        for source in sources:
+            contest = source['contest']
+            number = source['number']
+            without = source.get('without')
+            key = (contest, number, without)
+            users = self.cache.get(key)
+            if not users:
+                contest = self.contest_id(contest)
+                if without:
+                    without = self.contest_id(without)
 
-                members = page.xpath('//tr[contains(@id, "standings-row-for-place")]//a[contains(@href, "/profile/")]/img[@title]/@title')  # noqa
-                users.extend(members)
+                users = []
+                page_num = 1
+                total_num_pages = None
+                while len(users) < number and (total_num_pages is None or page_num <= total_num_pages):
+                    url = f'/contest/{contest}/standings'
+                    if without:
+                        url = f'{url}/without/{without}'
+                    page = self.get(f'{url}/page/{page_num}', parse=True)
 
-                if total_num_pages is None:
-                    total_num_pages = self.total_num_pages(page)
+                    members = page.xpath('//tr[contains(@id, "standings-row-for-place")]//a[contains(@href, "/profile/")]/img[@title]/@title')  # noqa
+                    users.extend(members)
+
                     if total_num_pages is None:
-                        break
+                        total_num_pages = self.total_num_pages(page)
+                        if total_num_pages is None:
+                            break
 
-                print(f'\rrandom from top... {page_num} of {total_num_pages}', end='\n')
-                page_num += 1
+                    inline_logger(f'top... {page_num} of {total_num_pages}')
+                    page_num += 1
+                inline_logger.clear()
 
-            users = users[:number]
-            random.shuffle(users)
-            self.cache[key] = users
-        return users.pop(0)
+                users = users[:number]
+                users = [{'username': user} for user in users]
+                self.cache[key] = users
+            ret.extend(users)
+        return ret
 
     def clear_cache(self):
         self.cache = {}
 
-    def create_game(self, users, formats):
+    def create_game(self, users, formats, allow_duplicate_users):
         game_params = {
             'action': 'createGame',
             'csrf_token': self.csrf_token,
@@ -262,20 +307,32 @@ class RAIC:
         self.clear_cache()
         username_for_suggest = None
         strategies = []
-        for idx, user in enumerate(users, start=1):
-            query = user.get('query')
+        users = deepcopy(users)
+        used = set()
+        for participant_idx, user in enumerate(users, start=1):
+            query = user.pop('query', None)
             if 'username' not in user:
                 if query == 'suggest':
                     assert username_for_suggest, 'Suggest query must be after user with username set'
-                    username = self.suggest(username_for_suggest)
+                    users = self.suggest(username_for_suggest)
                 elif query == 'top':
-                    username = self.random_from_top(user['contest'], user['number'])
+                    users = self.top(user.pop('sources'))
+                elif query == 'random':
+                    users = user.pop('users')
                 else:
                     raise ValueError(f'Unknown query "{query}"')
-            else:
-                username = user['username']
 
-            username_for_suggest = username
+                logger.debug(f'Random choice from {len(users)} users')
+                while True:
+                    idx = random.randint(1, len(users)) - 1
+                    user = users.pop(idx)
+                    if allow_duplicate_users or user['username'] not in used:
+                        break
+                    logger.debug(f'Skip {user}')
+            else:
+                username_for_suggest = user['username']
+            username = user['username']
+            used.add(username)
 
             strategy = user.get('strategy')
             if not strategy:
@@ -286,9 +343,10 @@ class RAIC:
                 })
                 strategy = int(data['strategyCount'])
 
-            game_params[f'participant{idx}'] = username
-            game_params[f'participant{idx}Strategy'] = strategy - 1
+            game_params[f'participant{participant_idx}'] = username
+            game_params[f'participant{participant_idx}Strategy'] = strategy - 1
             strategies.append(f'{username}#{strategy}')
+            logger.debug(f'Pick {username}#{strategy}')
 
         logger.info(' vs '.join(strategies))
 
@@ -315,9 +373,9 @@ class RAIC:
             if user_data.get("last_game_id") in ids:
                 break
             of = total_num_pages - user_data.get("total_num_pages", 1) + 1
-            print(f'\rfetch game pages... {page_num} of {of}', end='')
+            inline_logger(f'fetch game pages... {page_num} of {of}')
             page_num += 1
-        print(end='\r')
+        inline_logger.clear()
 
         if not game_ids:
             return
@@ -373,7 +431,7 @@ class Main:
         self._raic = RAIC(cookie_file=cookie_file, cache_folder=cache_folder)
         self._raic.signin()
 
-    def create_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20):
+    def create_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20, allow_duplicate_users=False):
         timing = []
         while True:
             if len(timing) == limit_game:
@@ -381,7 +439,7 @@ class Main:
 
             while True:
                 try:
-                    self._raic.create_game(self._config['users'], self._config['formats'])
+                    self._raic.create_game(self._config['users'], self._config['formats'], allow_duplicate_users)
                     timing.append(datetime.now())
                     break
                 except CreateGameFailed:
