@@ -5,19 +5,25 @@ import getpass
 import logging
 import random
 import glob
+import re
+from functools import partial
 from copy import deepcopy
 from datetime import datetime, timedelta
 from time import sleep
+from pprint import pprint  # noqa: F401
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-
 
 import coloredlogs
 import fire
 import requests
 import yaml
 import tqdm
+from dateutil import parser
 from lxml.html import fromstring
+from prettytable import PrettyTable
+
+from fire_utils import only_allow_defined_args
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +94,7 @@ class UserFolder:
         self.username = username
         self.folder = os.path.join(cache_folder, username)
         self.games_folder = os.path.join(self.folder, 'games')
+        ensure_folder(self.games_folder)
 
     @property
     def data_file(self):
@@ -101,6 +108,9 @@ class UserFolder:
         else:
             data = {}
         return data
+
+    def user_id(self):
+        return self.read_data().get('user_id')
 
     def write_data(self, data):
         with open(self.data_file, 'w') as fo:
@@ -119,18 +129,23 @@ class UserFolder:
         with open(game_file, 'r') as fo:
             game_data = yaml.safe_load(fo)
 
+        info = game_data['game']
         ret = {
-            'info': game_data['game'],
-            'participants': {},
+            'info': info,
+            'participants': [],
+            'users': {},
         }
         rating_changes = game_data.get('ratingChanges')
-        for idx, (participant, user) in enumerate(zip(game_data['gameParticipants'], game_data['users'])):
-            user = user['login']
-            participant['user'] = user
+
+        users = game_data['usersRaw'] or game_data['users']
+        ret['users'] = {u['login'] for u in users}
+
+        for idx, participant in enumerate(game_data['gameParticipants']):
             if rating_changes:
                 participant['ratingChanges'] = rating_changes[idx]
-            ret['participants'][user] = participant
+            ret['participants'].append(participant)
 
+        info['creation_time'] = parser.parse(info['creationTime'])
         return ret
 
     def write_game(self, game_id, data):
@@ -142,7 +157,7 @@ class UserFolder:
         files.sort(reverse=True)
 
         with ProcessPoolExecutor() as executor, tqdm.tqdm(total=len(files), leave=True) as pbar:
-            for game in executor.map(self.read_game, files):
+            for game in executor.map(partial(self.read_game), files):
                 pbar.update()
                 yield game
 
@@ -197,8 +212,8 @@ class RAIC:
         inline_logger.clear()
 
         if 'application/json' in response.headers.get('content-type'):
-            response = response.json()
-        elif parse:
+            return response.json()
+        if parse:
             response = fromstring(response.content)
             token = response.xpath('//meta[@name="X-Csrf-Token"]/@content')
             if token:
@@ -213,6 +228,11 @@ class RAIC:
     def total_num_pages(page):
         page_nums = page.xpath('//*[@class="page-index"]/a/text()')
         return int(page_nums[-1]) if page_nums else None
+
+    @staticmethod
+    def user_id(page):
+        match = re.search(r'userId\s*:\s*([0-9]+)', page)
+        return int(match.group(1)) if match else None
 
     def is_authorized(self, page):
         return bool(page.xpath('//a[@class="logout" and contains(@href, "signOut")]'))
@@ -239,7 +259,7 @@ class RAIC:
         if errors:
             for error in errors:
                 logger.error(f'{error}')
-            return True
+            return errors
         return False
 
     def suggest(self, username):
@@ -351,8 +371,9 @@ class RAIC:
         logger.info(' vs '.join(strategies))
 
         page = self.post('/game/create', data=game_params, parse=True)
-        if self.has_errors(page):
-            raise CreateGameFailed()
+        errors = self.has_errors(page)
+        if errors:
+            raise CreateGameFailed(errors)
 
     def fetch_games(self, username):
         user = UserFolder(username, self.cache_folder)
@@ -363,6 +384,7 @@ class RAIC:
         total_num_pages = None
         while total_num_pages is None or page_num <= total_num_pages:
             page = self.get(f'/profile/{username}/allGames/page/{page_num}', parse=True)
+
             ids = [str(i) for i in page.xpath('//a[starts-with(@href, "/game/view/") and not(@style)]/text()')]
             game_ids.extend(ids)
 
@@ -400,7 +422,27 @@ class RAIC:
 
     def games(self, username):
         user = UserFolder(username, self.cache_folder)
-        return user.games()
+        for game in user.games():
+            users_by_id = {}
+            for username in game['users']:
+                user_folder = UserFolder(username, self.cache_folder)
+                user_id = user_folder.user_id()
+                if user_id is None:
+                    response = self.get(f'/profile/{username}')
+                    user_id = self.user_id(response.content.decode('utf8'))
+                    assert user_id, 'User id must be got'
+                    user_data = user_folder.read_data()
+                    user_data['user_id'] = user_id
+                    user_folder.write_data(user_data)
+                users_by_id[user_id] = username
+
+            participants = {}
+            for p in game['participants']:
+                username = users_by_id[p['userId']]
+                p['username'] = username
+                participants[username] = p
+            game['participants'] = participants
+            yield game
 
     def game_url(self, game_id):
         return urljoin(self.host, f'/game/view/{game_id}')
@@ -431,18 +473,32 @@ class Main:
         self._raic = RAIC(cookie_file=cookie_file, cache_folder=cache_folder)
         self._raic.signin()
 
-    def create_game(self, limit=1, delay_on_failed=5, limit_game=4, limit_delay=20, allow_duplicate_users=False):
+    @only_allow_defined_args
+    def create_game(self, limit=1, limit_game=None, limit_delay=None, allow_duplicate_users=False):
         timing = []
+        create_game = self._config['create-game']
         while True:
-            if len(timing) == limit_game:
-                wait(timing.pop(0) + timedelta(minutes=limit_delay))
+            if limit_game:
+                while len(timing) > limit_game:
+                    timing.pop(0)
+                if len(timing) == limit_game:
+                    wait(timing.pop(0) + timedelta(minutes=limit_delay))
 
             while True:
                 try:
-                    self._raic.create_game(self._config['users'], self._config['formats'], allow_duplicate_users)
+                    self._raic.create_game(create_game['users'], create_game['formats'], allow_duplicate_users)
                     timing.append(datetime.now())
                     break
-                except CreateGameFailed:
+                except CreateGameFailed as e:
+                    for error in e.args[0]:
+                        match = re.search('You can not create more than ([0-9]+) games in ([0-9]+) minutes', error)
+                        if match:
+                            limit_game = int(match.group(1))
+                            limit_delay = int(match.group(2))
+                    if limit_delay is not None and limit_game is not None:
+                        delay_on_failed = limit_delay / limit_game
+                    else:
+                        delay_on_failed = 60
                     wait(timedelta(minutes=delay_on_failed))
                     continue
 
@@ -451,20 +507,45 @@ class Main:
                 if not limit:
                     break
 
-    def find_games(self, username, limit=10, contest=None, rank=None):
+    def find_games(self, username, limit=10, **kwargs):
         self._raic.fetch_games(username)
 
+        find_games = deepcopy(self._config['find-games'])
+        find_games.update(kwargs)
+
+        users = find_games.get('users')
+        if users:
+            if isinstance(users, str):
+                users = [users]
+            users = set(users)
+
+        contest = find_games.get('contest')
         if contest:
-            contest = self._raic.contest_id(contest)
+            contest_id = self._raic.contest_id(contest)
+
+        datetime_from = find_games.get('datetime_from')
+        if datetime_from:
+            datetime_from = parser.parse(datetime_from)
 
         games = []
+
         for game in self._raic.games(username):
             info = game['info']
-            if contest and info.get('contestId') != contest:
+            user_info = game['participants'][username]
+
+            if datetime_from and datetime_from > info['creation_time']:
+                break
+
+            if find_games.get('attributes') and find_games['attributes'] != info['attributes']:
                 continue
 
-            participant = game['participants'][username]
-            if rank and participant.get('rank') != rank:
+            if find_games.get('rank') and find_games['rank'] != user_info['rank']:
+                continue
+
+            if users and not users & game['users']:
+                continue
+
+            if contest and contest_id != info.get('contestId'):
                 continue
 
             games.append(game)
@@ -474,9 +555,34 @@ class Main:
                 if not limit:
                     break
 
+        headers = find_games['headers']
+        table = PrettyTable(headers)
+        for k, v in find_games.get('alignment').items():
+            table.align[k] = v
+
+        games_num_rows = []
         for game in games:
             url = self._raic.game_url(game['info']['id'])
-            print(url)
+            num_rows = 0
+            if not games_num_rows:
+                num_rows += 3
+            for p in sorted(game['participants'].values(), key=lambda p: p['score'], reverse=True):
+                p['url'] = url
+                url = ''
+                p['strategy'] = f"{'* ' if username == p['username'] else ''}{p['username']}#{p['strategyVersion']}"
+                table.add_row([p.get(k, '') for k in headers])
+                num_rows += 1
+            games_num_rows.append(num_rows)
+
+        lines = table.get_string().splitlines()
+        sep = lines.pop(-1)
+        idx = 0
+        for line in lines:
+            print(line)
+            games_num_rows[idx] -= 1
+            if games_num_rows[idx] == 0:
+                print(sep)
+                idx += 1
 
 
 if __name__ == '__main__':

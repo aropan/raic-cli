@@ -1,26 +1,43 @@
 # create-game
-users:
-  - username: aropan
-    # strategy: 6
+create-game:
+  users:
+    - username: aropan
+      # strategy: 6
 
-  - query: top
-    sources:
-      - contest: round2
-        number: 50
-      - contest: sandbox
-        number: 10
-        without: finals
+    - query: top
+      sources:
+        - contest: round2
+          number: 20
+        - contest: sandbox
+          number: 10
+          without: finals
 
-  # - query: random
-  #   users:
-  #     - username: Commandos
-  #     - username: Recar
-  #     - username: GreenTea
-  #     - username: Romka
+    # - query: random
+    #   users:
+    #     - username: Commandos
+    #       # strategy: 58
+    #     - username: Recar
+    #     - username: GreenTea
+    #     - username: Romka
 
-  # - query: suggest
+    # - query: suggest
 
-formats:
-  # - 4x1$${"preset":"Round1"}
-  # - 4x1$${"preset":"Round2"}
-  - 2x1$${"preset":"Finals"}
+  formats:
+    # - 4x1$${"preset":"Round1"}
+    # - 4x1$${"preset":"Round2"}
+    - 2x1$${"preset":"Finals"}
+
+
+find-games:
+  # attributes: '{"preset":"Finals"}'
+  # datetime_from: '26 Dec'
+  # rank: 2
+  # contest: finals
+  headers:
+    - url
+    - rank
+    - strategy
+    - score
+  alignment:
+    score: r
+    strategy: l
