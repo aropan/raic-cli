@@ -40,6 +40,9 @@ To find games, run:
 ```
 ./raic_cli.py find-games $USER
 ```
+![image](https://user-images.githubusercontent.com/1968460/103151320-2369da80-478e-11eb-9b2c-761e4b34793c.png)
+
+
 
 or set some params for filter:
 ```
