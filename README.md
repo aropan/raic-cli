@@ -49,4 +49,4 @@ or set some params for filter:
 ./raic_cli.py find-games $USER --nolimit --datetime-from '26 Dec' --rank 2 --contest finals
 ```
 
-First query for user will be long. Use `limit` or `datetime-from` for more fast response (without iterating over all games).
+First query for user will take a long time. Use `limit` or `datetime-from` for more fast response (without iterating over all games).
