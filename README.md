@@ -8,37 +8,9 @@ Install packages from requirements file, run:
 pip3 install -r requirements.txt
 ```
 
-Edit config file `config.yaml`, as example:
-```yaml
-# create-game
-users:
-  - username: aropan
-    # strategy: 6
+Edit config file `config.yaml`
 
-  - query: top
-    sources:
-      - contest: round2
-        number: 50
-      - contest: sandbox
-        number: 10
-        without: finals
-
-  # - query: random
-  #   users:
-  #     - username: Commandos
-  #     - username: Recar
-  #     - username: GreenTea
-  #     - username: Romka
-
-  # - query: suggest
-
-formats:
-  # - 4x1$${"preset":"Round1"}
-  # - 4x1$${"preset":"Round2"}
-  - 2x1$${"preset":"Finals"}
-```
-
-### Create game
+### Create games
 
 To create a game, run:
 ```
@@ -62,3 +34,16 @@ See more options:
 
 If something went wrong than error should be print.
 
+### Find games
+
+To find games, run:
+```
+./raic_cli.py find-games $USER
+```
+
+or set some params for filter:
+```
+./raic_cli.py find-games $USER --nolimit --datetime-from '26 Dec' --rank 2 --contest finals
+```
+
+First query for user will be long. Use `limit` or `datetime-from` for more fast response (without iterating over all games).
