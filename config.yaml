@@ -33,17 +33,18 @@ find-games:
   datetime_from: '27 Dec'
   # rank: 2
   contest: finals
-  headers:
-    - url
-    - rank
-    - strategy
-    - score
-  alignment:
-    score: r
-    strategy: l
-  # sort:
-  #   by: time
-  #   reverse: false
+  games:
+    headers:
+      - url
+      - rank
+      - strategy
+      - score
+    alignment:
+      score: r
+      strategy: l
+    # sort:
+    #   by: time
+    #   reverse: false
   statistics:
     headers:
       - user

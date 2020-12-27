@@ -90,8 +90,10 @@ def ensure_folder(folder):
 
 
 def pretty_table_from_dict(data):
-    headers = data['headers']
-    table = PrettyTable(headers)
+    if not data:
+        return PrettyTable()
+
+    table = PrettyTable(data['headers'])
     for k, v in data.get('alignment', {}).items():
         table.align[k] = v
 
@@ -100,6 +102,15 @@ def pretty_table_from_dict(data):
         table.sortby = sorting['by']
         table.reversesort = sorting.get('reverse', False)
     return table
+
+
+def update_config(config, args):
+    for key, value in args.items():
+        *path, key = key.split('.')
+        data = config
+        for p in path:
+            data = data.setdefault(p, {})
+        data[key] = value
 
 
 class UserFolder:
@@ -533,25 +544,24 @@ class Main:
     def find_games(self, username, limit=10, **kwargs):
         self._raic.fetch_games(username)
 
-        find_games = deepcopy(self._config['find-games'])
-        find_games.update(kwargs)
+        config = deepcopy(self._config['find-games'])
+        update_config(config, kwargs)
 
-        users = find_games.get('users')
+        users = config.get('users')
         if users:
             if isinstance(users, str):
                 users = [users]
             users = set(users)
 
-        contest = find_games.get('contest')
+        contest = config.get('contest')
         if contest:
             contest_id = self._raic.contest_id(contest)
 
-        datetime_from = find_games.get('datetime_from')
+        datetime_from = config.get('datetime_from')
         if datetime_from:
             datetime_from = parser.parse(datetime_from)
 
         games = []
-
         for game in self._raic.games(username):
             info = game['info']
             user_info = game['participants'][username]
@@ -559,13 +569,13 @@ class Main:
             if datetime_from and datetime_from > info['creation_time']:
                 break
 
-            if find_games.get('attributes') and find_games['attributes'] != info['attributes']:
+            if config.get('attributes') and config['attributes'] != info['attributes']:
                 continue
 
-            if find_games.get('rank') and find_games['rank'] != user_info['rank']:
+            if config.get('rank') and config['rank'] != user_info['rank']:
                 continue
 
-            if find_games.get('strategy') and find_games['strategy'] != user_info['strategyVersion']:
+            if config.get('strategy') and config['strategy'] != user_info['strategyVersion']:
                 continue
 
             if users and not users & game['users']:
@@ -581,43 +591,41 @@ class Main:
                 if not limit:
                     break
 
-        table = pretty_table_from_dict(find_games)
-        sortby = getattr(table, 'sortby', None)
+        return_data = config.get('return_data')
+
+        games_info = config.get('games')
+        games_table = pretty_table_from_dict(games_info)
+        sortby = getattr(games_table, 'sortby', None)
 
         statistics = {}
         games_num_rows = []
         for game in games:
             url = self._raic.game_url(game['info']['id'])
-            num_rows = 0
-            if not games_num_rows:
-                num_rows += 3
-            ctime = game['info']['creationTime']
             my_rank = game['participants'][username]['rank']
+            num_rows = 0
             for p in sorted(game['participants'].values(), key=lambda p: p['score'], reverse=True):
-                p_user = p['username']
-                p['url'] = url
-                p['ctime'] = ctime
-                if not sortby:
-                    url = ''
-                    ctime = ''
-                p['strategy'] = f"{'* ' if username == p_user else ''}{p_user}#{p['strategyVersion']}"
-                table.add_row([p.get(k, '') for k in table.field_names])
                 num_rows += 1
+                p_user = p['username']
+                if num_rows == 1 or sortby:
+                    p['url'] = url
+                    p['ctime'] = game['info']['creationTime']
+                p['strategy'] = f"{'* ' if username == p_user else ''}{p_user}#{p['strategyVersion']}"
+                games_table.add_row([p.get(k, '') for k in games_table.field_names])
 
                 if p_user != username:
                     stat = statistics.setdefault(p_user, defaultdict(int))
                     stat['total'] += 1
                     stat['n_win'] += my_rank < p['rank']
                     stat['n_lose'] += my_rank > p['rank']
+            if not games_num_rows:
+                num_rows += 3
             games_num_rows.append(num_rows)
 
-        return_data = find_games.get('return_data')
-
-        if not return_data:
+        if not return_data and games_info:
             if sortby:
-                print(table)
+                print(games_table)
             else:
-                lines = table.get_string().splitlines()
+                lines = games_table.get_string().splitlines()
                 sep = lines.pop(-1)
                 idx = 0
                 for line in lines:
@@ -627,7 +635,7 @@ class Main:
                         print(sep)
                         idx += 1
 
-        stats_info = find_games.get('statistics')
+        stats_info = config.get('statistics')
         if stats_info:
             stat_table = pretty_table_from_dict(stats_info)
             total = defaultdict(int)
@@ -652,14 +660,16 @@ class Main:
 
         if return_data:
             ret = {}
+            if games_info:
+                ret['games'] = games
             if stats_info:
                 ret['total'] = total
             return ret
 
     def win_rates(self, **kwargs):
-        win_rates = deepcopy(self._config['win-rates'])
-        users = self._raic.top(win_rates['sources'])
-        table = pretty_table_from_dict(win_rates)
+        config = deepcopy(self._config['win-rates'])
+        users = self._raic.top(config['sources'])
+        table = pretty_table_from_dict(config)
         for user in users:
             username = user['username']
             data = self.find_games(username, limit=False, return_data=True, **kwargs)
