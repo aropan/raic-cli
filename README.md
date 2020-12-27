@@ -8,7 +8,7 @@ Install packages from requirements file, run:
 pip3 install -r requirements.txt
 ```
 
-Edit config file `config.yaml`
+Edit config file [config.yaml](config.yaml)
 
 ### Create games
 
@@ -48,5 +48,7 @@ or set some params for filter:
 ```
 ./raic_cli.py find-games $USER --nolimit --datetime-from '26 Dec' --rank 2 --contest finals
 ```
+
+or without games `./raic_cli.py find-games $USER --nogames` or without statistics `./raic_cli.py find-games $USER --nostatistics`.
 
 First query for user will take a long time. Use `limit` or `datetime-from` for more fast response (without iterating over all games).
