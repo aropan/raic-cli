@@ -6,6 +6,7 @@ import logging
 import random
 import glob
 import re
+from collections import defaultdict
 from functools import partial
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -88,6 +89,19 @@ def ensure_folder(folder):
     os.makedirs(folder, exist_ok=True)
 
 
+def pretty_table_from_dict(data):
+    headers = data['headers']
+    table = PrettyTable(headers)
+    for k, v in data.get('alignment', {}).items():
+        table.align[k] = v
+
+    sorting = data.get('sort')
+    if sorting:
+        table.sortby = sorting['by']
+        table.reversesort = sorting.get('reverse', False)
+    return table
+
+
 class UserFolder:
 
     def __init__(self, username, cache_folder):
@@ -143,6 +157,15 @@ class UserFolder:
         for idx, participant in enumerate(game_data['gameParticipants']):
             if rating_changes:
                 participant['ratingChanges'] = rating_changes[idx]
+
+            for line in participant['strategyProtocol'].split('\n')[::-1]:
+                line = line.strip()
+                if line.startswith('Consumed time'):
+                    participant['time'] = line.split(':')[-1].strip()
+                elif line.startswith('Memory used'):
+                    participant['memory'] = line.split(':')[-1].strip()
+                    break
+
             ret['participants'].append(participant)
 
         info['creation_time'] = parser.parse(info['creationTime'])
@@ -542,6 +565,9 @@ class Main:
             if find_games.get('rank') and find_games['rank'] != user_info['rank']:
                 continue
 
+            if find_games.get('strategy') and find_games['strategy'] != user_info['strategyVersion']:
+                continue
+
             if users and not users & game['users']:
                 continue
 
@@ -555,34 +581,92 @@ class Main:
                 if not limit:
                     break
 
-        headers = find_games['headers']
-        table = PrettyTable(headers)
-        for k, v in find_games.get('alignment').items():
-            table.align[k] = v
+        table = pretty_table_from_dict(find_games)
+        sortby = getattr(table, 'sortby', None)
 
+        statistics = {}
         games_num_rows = []
         for game in games:
             url = self._raic.game_url(game['info']['id'])
             num_rows = 0
             if not games_num_rows:
                 num_rows += 3
+            ctime = game['info']['creationTime']
+            my_rank = game['participants'][username]['rank']
             for p in sorted(game['participants'].values(), key=lambda p: p['score'], reverse=True):
+                p_user = p['username']
                 p['url'] = url
-                url = ''
-                p['strategy'] = f"{'* ' if username == p['username'] else ''}{p['username']}#{p['strategyVersion']}"
-                table.add_row([p.get(k, '') for k in headers])
+                p['ctime'] = ctime
+                if not sortby:
+                    url = ''
+                    ctime = ''
+                p['strategy'] = f"{'* ' if username == p_user else ''}{p_user}#{p['strategyVersion']}"
+                table.add_row([p.get(k, '') for k in table.field_names])
                 num_rows += 1
+
+                if p_user != username:
+                    stat = statistics.setdefault(p_user, defaultdict(int))
+                    stat['total'] += 1
+                    stat['n_win'] += my_rank < p['rank']
+                    stat['n_lose'] += my_rank > p['rank']
             games_num_rows.append(num_rows)
 
-        lines = table.get_string().splitlines()
-        sep = lines.pop(-1)
-        idx = 0
-        for line in lines:
-            print(line)
-            games_num_rows[idx] -= 1
-            if games_num_rows[idx] == 0:
-                print(sep)
-                idx += 1
+        return_data = find_games.get('return_data')
+
+        if not return_data:
+            if sortby:
+                print(table)
+            else:
+                lines = table.get_string().splitlines()
+                sep = lines.pop(-1)
+                idx = 0
+                for line in lines:
+                    print(line)
+                    games_num_rows[idx] -= 1
+                    if games_num_rows[idx] == 0:
+                        print(sep)
+                        idx += 1
+
+        stats_info = find_games.get('statistics')
+        if stats_info:
+            stat_table = pretty_table_from_dict(stats_info)
+            total = defaultdict(int)
+            total['user'] = 'TOTAL:'
+
+            def update_stat(stat):
+                stat['win'] = f"{stat['n_win'] / stat['total']:.3f}"
+                stat['lose'] = f"{stat['n_lose'] / stat['total']:.3f}"
+
+            for stat in statistics.values():
+                update_stat(stat)
+            for user, stat in sorted(statistics.items(), key=lambda v: v[1]['win']):
+                stat['user'] = user
+                stat_table.add_row([stat.get(k, '') for k in stat_table.field_names])
+                for k in 'total', 'n_win', 'n_lose':
+                    total[k] += stat[k]
+                total['win'] += float(stat['win'])
+            total['win'] = f"{total['win'] / len(statistics):.3f}"
+            stat_table.add_row([total.get(k, '') for k in stat_table.field_names])
+            if not return_data:
+                print(stat_table)
+
+        if return_data:
+            ret = {}
+            if stats_info:
+                ret['total'] = total
+            return ret
+
+    def win_rates(self, **kwargs):
+        win_rates = deepcopy(self._config['win-rates'])
+        users = self._raic.top(win_rates['sources'])
+        table = pretty_table_from_dict(win_rates)
+        for user in users:
+            username = user['username']
+            data = self.find_games(username, limit=False, return_data=True, **kwargs)
+            values = data.get('total', {})
+            values['user'] = username
+            table.add_row([values.get(k, '') for k in table.field_names])
+        print(table)
 
 
 if __name__ == '__main__':

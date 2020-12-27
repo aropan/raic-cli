@@ -1,24 +1,24 @@
-# create-game
 create-game:
   users:
     - username: aropan
       # strategy: 6
 
-    - query: top
-      sources:
-        - contest: round2
-          number: 20
-        - contest: sandbox
-          number: 10
-          without: finals
+    # - query: top
+    #   sources:
+    #     - contest: round2
+    #       number: 20
+    #     - contest: sandbox
+    #       number: 10
+    #       without: finals
 
     # - query: random
     #   users:
-    #     - username: Commandos
-    #       # strategy: 58
-    #     - username: Recar
-    #     - username: GreenTea
     #     - username: Romka
+    #     - username: TonyK
+    #     - username: HiPravin
+    #     - username: StarWix
+    #     - username: Leos
+    #     - username: karliso
 
     # - query: suggest
 
@@ -29,10 +29,10 @@ create-game:
 
 
 find-games:
-  # attributes: '{"preset":"Finals"}'
-  # datetime_from: '26 Dec'
+  attributes: '{"preset":"Finals"}'
+  datetime_from: '27 Dec'
   # rank: 2
-  # contest: finals
+  contest: finals
   headers:
     - url
     - rank
@@ -41,3 +41,27 @@ find-games:
   alignment:
     score: r
     strategy: l
+  # sort:
+  #   by: time
+  #   reverse: false
+  statistics:
+    headers:
+      - user
+      - win
+      - total
+      - n_win
+      - n_lose
+    alignment:
+      user: l
+  # return_data: true
+
+win-rates:
+  sources:
+    - contest: finals
+      number: 10
+  headers:
+    - user
+    - win
+  sort:
+    by: win
+    reverse: true
